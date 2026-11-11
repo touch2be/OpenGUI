@@ -1,8 +1,11 @@
 /**
- * The `claude-code` pi provider: Claude models served by Claude Code through the Agent SDK,
- * with the user's Claude subscription, a `claude setup-token` token, or an Anthropic API key.
- * pi and OpenGUI see an ordinary provider; `runtime.ts` does the work.
+ * The `claude-code` pi provider, shown as "Anthropic": Claude models served by Claude Code
+ * through the Agent SDK, with the user's Claude subscription, a `claude setup-token` token, or
+ * an Anthropic API key. pi and OpenGUI see an ordinary provider; `runtime.ts` does the work.
  */
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import {
   createAssistantMessageEventStream,
   createProvider,
@@ -11,6 +14,7 @@ import {
   type Api,
   type AssistantMessage,
   type Model,
+  type OAuthAuth,
   type OAuthCredential,
   type Provider,
   type ProviderAuthInteraction,
@@ -32,7 +36,7 @@ import {
 export const CLAUDE_CODE_PROVIDER_ID = "claude-code";
 export const CLAUDE_CODE_API = "claude-code";
 
-/** Claude Code tokens and the local login do not expire on OpenGUI's side. */
+/** `claude setup-token` tokens and the local login do not expire on OpenGUI's side. */
 const NEVER = Date.UTC(9999, 0, 1);
 
 /** Models Claude Code serves, in menu order; metadata comes from pi's Anthropic catalog. */
@@ -93,12 +97,82 @@ export function claudeCodeEffort(model: Model<Api>, level: ThinkingLevel | undef
   return level === "minimal" ? "low" : undefined;
 }
 
-type ClaudeCodeOAuthCredential = OAuthCredential & { mode?: "local" | "oauth-token" };
+/**
+ * How a subscription credential signs in to Claude Code:
+ * - `account`: a Claude account signed in through Anthropic's OAuth flow in the browser. OpenGUI
+ *   keeps its access and refresh tokens and hands Claude Code the current access token;
+ * - `local`: the account the `claude` CLI is signed in to on the Host machine;
+ * - `oauth-token` (or no mode, from before modes existed): a pasted `claude setup-token` token.
+ */
+type LoginMode = "account" | "local" | "oauth-token";
+type ClaudeCodeOAuthCredential = OAuthCredential & { mode?: LoginMode };
 
 function oauthToCredential(credential: ClaudeCodeOAuthCredential): ClaudeCodeCredential {
   return credential.mode === "local"
     ? { mode: "local" }
     : { mode: "oauth-token", token: credential.access };
+}
+
+/** pi's Anthropic OAuth flow; signs a Claude account in and refreshes its tokens. */
+export type ClaudeAccountOAuth = Pick<OAuthAuth, "login" | "refresh">;
+
+function piAnthropicOAuth(): ClaudeAccountOAuth {
+  const oauth = builtinProviders().find((provider) => provider.id === "anthropic")?.auth.oauth;
+  if (!oauth) throw new Error("This OpenGUI build has no Claude account sign-in");
+  return oauth;
+}
+
+/**
+ * pi's Anthropic flow either catches the browser's redirect on this machine or has the user paste
+ * the code Anthropic shows. Only the desktop app's Host shares a machine with the browser.
+ */
+function accountLoginFlow(env: NodeJS.ProcessEnv = process.env) {
+  return env.OPENGUI_SERVER_MODE === "desktop-sidecar" ? "browser" : "copy_code";
+}
+
+/** Whether `claude` is signed in on the Host machine; only then can its login be offered. */
+export function claudeCodeLocalLoginAvailable(env: NodeJS.ProcessEnv = process.env) {
+  // The desktop app shares the user's machine; macOS keeps the login in the Keychain.
+  if (env.OPENGUI_SERVER_MODE === "desktop-sidecar") return true;
+  const directory = env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), ".claude");
+  return existsSync(join(directory, ".credentials.json"));
+}
+
+/** A request that started just before the token expired may run for a while: renew early. */
+const ACCOUNT_RENEW_EARLY_MS = 30 * 60 * 1000;
+
+/** The stored account credential, renewed well before its access token stops working. */
+function accountCredential(
+  next: OAuthCredential,
+  previous?: OAuthCredential,
+): ClaudeCodeOAuthCredential {
+  const now = Date.now();
+  const lifetime = Math.max(0, next.expires - now);
+  return {
+    ...next,
+    type: "oauth",
+    // Keep the refresh token when Anthropic does not rotate it.
+    refresh: next.refresh || previous?.refresh || "",
+    expires: now + Math.max(lifetime / 2, lifetime - ACCOUNT_RENEW_EARLY_MS),
+    mode: "account",
+  };
+}
+
+async function loginAccount(
+  interaction: ProviderAuthInteraction,
+  account: ClaudeAccountOAuth,
+  flow: "browser" | "copy_code",
+) {
+  const credential = await account.login({
+    ...interaction,
+    // pi asks how to sign in; OpenGUI knows whether the browser shares the Host's machine.
+    prompt: async (prompt) =>
+      prompt.type === "select" && prompt.options.some((option) => option.id === flow)
+        ? flow
+        : interaction.prompt(prompt),
+  });
+  if (!credential.refresh) throw new Error("Anthropic returned no refresh token");
+  return accountCredential(credential);
 }
 
 async function promptToken(interaction: ProviderAuthInteraction) {
@@ -121,6 +195,12 @@ export interface ClaudeCodeProviderOptions {
    * Only the Host's own scope may: a personal connection must bring its own credential.
    */
   allowLocalLogin?: boolean;
+  /** Whether `claude` is signed in on this machine; checked when a sign-in starts. */
+  localLoginAvailable?: () => boolean;
+  /** The Claude account sign-in; pi's Anthropic OAuth flow by default. */
+  account?: ClaudeAccountOAuth;
+  /** How the account sign-in returns to OpenGUI; decided by where the Host runs by default. */
+  accountLoginFlow?: () => "browser" | "copy_code";
   runtime?: ClaudeCodeRuntime;
 }
 
@@ -189,6 +269,10 @@ function classified(error: unknown) {
 
 export function createClaudeCodeProvider(options: ClaudeCodeProviderOptions = {}): Provider {
   const allowLocalLogin = options.allowLocalLogin ?? true;
+  const localLoginAvailable =
+    options.localLoginAvailable ?? (() => claudeCodeLocalLoginAvailable());
+  const account = () => options.account ?? piAnthropicOAuth();
+  const loginFlow = options.accountLoginFlow ?? (() => accountLoginFlow());
   const runtime = () => options.runtime ?? claudeCodeRuntime();
 
   const streamSimple = (
@@ -248,37 +332,46 @@ export function createClaudeCodeProvider(options: ClaudeCodeProviderOptions = {}
 
   return createProvider({
     id: CLAUDE_CODE_PROVIDER_ID,
-    name: "Claude Code",
+    name: "Anthropic",
     baseUrl: "claude-code://local",
     models: claudeCodeModels(),
     auth: {
       oauth: {
-        name: "Claude subscription (through Claude Code)",
-        loginLabel: "Sign in with Claude Code",
+        name: "Claude Pro or Max plan (runs Claude Code)",
+        loginLabel: "Sign in with Claude",
         isSubscription: true,
         async login(interaction) {
-          let mode: "local" | "oauth-token" = "oauth-token";
-          if (allowLocalLogin) {
-            mode = (await interaction.prompt({
-              type: "select",
-              message: "How should OpenGUI sign in to Claude Code?",
-              options: [
-                {
-                  id: "local",
-                  label: "Use Claude Code's login on this computer",
-                  description:
-                    "Uses the account `claude` is signed in to. Run `claude` and /login first if it is not.",
-                },
-                {
-                  id: "oauth-token",
-                  label: "Paste a token from `claude setup-token`",
-                  description: "A long-lived token for one Claude account.",
-                },
-              ],
-              signal: interaction.signal,
-            })) as "local" | "oauth-token";
-          }
+          const local = allowLocalLogin && localLoginAvailable();
+          const mode = (await interaction.prompt({
+            type: "select",
+            message: "How should OpenGUI sign in to Claude?",
+            options: [
+              {
+                id: "account",
+                label: "Sign in with your Claude account",
+                description:
+                  "Opens claude.ai in your browser. Uses your Claude Pro or Max plan through Claude Code.",
+              },
+              ...(local
+                ? [
+                    {
+                      id: "local",
+                      label: "Use Claude Code's login on this computer",
+                      description: "Uses the account the `claude` command is signed in to.",
+                    },
+                  ]
+                : []),
+              {
+                id: "oauth-token",
+                label: "Paste a token from `claude setup-token`",
+                description: "A long-lived token for one Claude account.",
+              },
+            ],
+            signal: interaction.signal,
+          })) as LoginMode;
+          if (mode === "account") return loginAccount(interaction, account(), loginFlow());
           if (mode === "local") {
+            if (!local) throw new Error("Claude Code is not signed in on this computer");
             interaction.notify({
               type: "info",
               message:
@@ -286,11 +379,15 @@ export function createClaudeCodeProvider(options: ClaudeCodeProviderOptions = {}
             });
             return { type: "oauth", access: "local", refresh: "claude-code", expires: NEVER, mode };
           }
+          if (mode !== "oauth-token") throw new Error(`Unknown sign-in method: ${String(mode)}`);
           const token = await promptToken(interaction);
           return { type: "oauth", access: token, refresh: "claude-code", expires: NEVER, mode };
         },
-        async refresh(credential) {
-          return { ...credential, expires: NEVER };
+        async refresh(credential, signal) {
+          if ((credential as ClaudeCodeOAuthCredential).mode !== "account") {
+            return { ...credential, expires: NEVER };
+          }
+          return accountCredential(await account().refresh(credential, signal), credential);
         },
         async toAuth(credential) {
           const decoded = oauthToCredential(credential as ClaudeCodeOAuthCredential);

@@ -21,7 +21,16 @@ export interface PiProviderDescriptor {
   name: string;
   apiKey?: { name: string; interactive: boolean };
   oauth?: { name: string; loginLabel?: string; subscription: boolean };
+  /** Replaced by an OpenGUI provider: an existing connection keeps working, new ones are not offered. */
+  retired?: boolean;
 }
+
+/**
+ * pi providers OpenGUI no longer offers. pi's `anthropic` calls the API directly; with a Claude
+ * subscription that is billed as extra usage. The Claude Code provider (shown as "Anthropic")
+ * runs Claude Code instead, so the plan's own limits apply.
+ */
+const RETIRED_PI_PROVIDERS: ReadonlySet<string> = new Set(["anthropic"]);
 
 // pi loads its OAuth flows through runtime-relative imports, which a bundled backend cannot
 // resolve. Registering them statically keeps sign-in and token refresh working when bundled.
@@ -64,7 +73,8 @@ export function piProviderDescriptors(): PiProviderDescriptor[] {
   return [...piProviders().values()]
     .map((provider) => ({
       id: provider.id,
-      name: provider.name,
+      // A retired provider can share its name with the one that replaced it.
+      name: RETIRED_PI_PROVIDERS.has(provider.id) ? `${provider.name} (direct API)` : provider.name,
       ...(provider.auth.apiKey
         ? {
             apiKey: {
@@ -82,6 +92,7 @@ export function piProviderDescriptors(): PiProviderDescriptor[] {
             },
           }
         : {}),
+      ...(RETIRED_PI_PROVIDERS.has(provider.id) ? { retired: true } : {}),
     }))
     .sort((left, right) => left.name.localeCompare(right.name));
 }

@@ -1666,15 +1666,19 @@ export class OpenGuiHost {
     return JSON.stringify([this.#personalActorId(actor), providerId]);
   }
 
-  /** Every pi provider, with the actor's connection and any sign-in in progress. */
+  /**
+   * Every pi provider, with the actor's connection and any sign-in in progress. A retired
+   * provider appears only while the actor is connected to it, so it can be disconnected.
+   */
   listProviders(actor?: DurableActor): HostProviderInfo[] {
     const actorId = this.#personalActorId(actor) ?? undefined;
-    return piProviderDescriptors().map((provider) => {
+    return piProviderDescriptors().flatMap(({ retired, ...provider }) => {
       const connectionId =
         (actorId &&
           providerCredentialConnectionId(this.#providerCredentials, provider.id, actorId)) ||
         providerCredentialConnectionId(this.#providerCredentials, provider.id);
       const entry = connectionId ? this.#providerCredentials[connectionId] : undefined;
+      if (retired && !entry) return [];
       const login = this.#providerLogins.status(this.#loginKey(provider.id, actor));
       return {
         ...provider,
@@ -1702,6 +1706,9 @@ export class OpenGuiHost {
   /** Starts pi's sign-in flow. Prompts and progress surface through `providerLoginStatus`. */
   beginProviderLogin(providerId: string, method: ProviderAuthMethod, actor?: DurableActor) {
     const provider = this.#requireProvider(providerId);
+    if (piProviderDescriptors().some((item) => item.id === providerId && item.retired)) {
+      throw new Error(`${provider.name} is no longer offered; sign in to Anthropic instead`);
+    }
     const auth = method === "oauth" ? provider.auth.oauth : provider.auth.apiKey;
     if (!auth?.login) throw new Error(`${provider.name} does not support this sign-in method`);
     const ownerId = this.#personalActorId(actor) ?? undefined;

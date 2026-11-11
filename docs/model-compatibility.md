@@ -12,9 +12,10 @@ lock. Administrators connect providers for the Host; members connect their own, 
 BYOK (API key) and BYOS (subscription) policy. Personal credentials never fall back to the Host's
 environment variables or credential files.
 
-OpenGUI adds one provider of its own, **Claude Code**, which runs Claude models through Claude Code
-and the Claude Agent SDK with a Claude subscription, a `claude setup-token` token or an API key. See
-[Claude Code provider](claude-code.md).
+OpenGUI adds one provider of its own, shown as **Anthropic** (id `claude-code`), which runs Claude
+models through Claude Code and the Claude Agent SDK with a Claude account sign-in, a
+`claude setup-token` token or an API key. It replaces pi's `anthropic` provider, which is offered
+only to disconnect an existing connection. See [Claude Code provider](claude-code.md).
 
 OpenCode Zen accepts an empty API key. Its free models are then requested without any
 credential; OpenGUI does not identify itself as the OpenCode client.

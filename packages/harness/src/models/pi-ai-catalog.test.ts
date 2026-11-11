@@ -38,10 +38,18 @@ describe("pi-ai provider catalogs", () => {
       oauth: { subscription: true },
     });
     expect(providers.find((provider) => provider.id === "openai-codex")?.apiKey).toBeUndefined();
+    // pi's direct Anthropic API is retired in favor of the Claude Code provider.
     expect(providers.find((provider) => provider.id === "anthropic")).toMatchObject({
+      name: "Anthropic (direct API)",
       apiKey: { interactive: true },
       oauth: { subscription: true },
+      retired: true,
     });
+    expect(providers.find((provider) => provider.id === "claude-code")).toMatchObject({
+      name: "Anthropic",
+      oauth: { subscription: true },
+    });
+    expect(providers.find((provider) => provider.id === "claude-code")?.retired).toBeUndefined();
   });
 
   test("keeps installed models for every chat API pi supports", () => {

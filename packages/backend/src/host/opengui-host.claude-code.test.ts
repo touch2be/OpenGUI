@@ -9,6 +9,7 @@ import { OpenGuiHost } from "./opengui-host.ts";
 const directories: string[] = [];
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await setClaudeCodeRuntime(undefined);
   await Promise.all(
     directories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
@@ -19,6 +20,14 @@ async function directory() {
   const path = await mkdtemp(join(tmpdir(), "opengui-claude-code-host-"));
   directories.push(path);
   return path;
+}
+
+/** Signs the `claude` CLI in on this "machine", so the Host may offer its login. */
+async function signInClaudeCli() {
+  const config = await directory();
+  await writeFile(join(config, ".credentials.json"), "{}");
+  vi.stubEnv("OPENGUI_SERVER_MODE", "");
+  vi.stubEnv("CLAUDE_CONFIG_DIR", config);
 }
 
 async function answer(
@@ -47,12 +56,13 @@ async function answer(
 
 describe("OpenGuiHost with the Claude Code provider", () => {
   test("signs in with Claude Code's local login and offers its models without pi.dev", async () => {
+    await signInClaudeCli();
     const fetchImpl = vi.fn(async () => new Response("not found", { status: 404 }));
     const host = new OpenGuiHost(await directory(), { fetchImpl: fetchImpl as typeof fetch });
     await host.start();
     const provider = host.listProviders().find((item) => item.id === "claude-code");
     expect(provider).toMatchObject({
-      name: "Claude Code",
+      name: "Anthropic",
       oauth: { subscription: true },
       apiKey: { interactive: true },
     });
@@ -85,9 +95,60 @@ describe("OpenGuiHost with the Claude Code provider", () => {
     });
     await host.start();
     const actor = { type: "user" as const, id: "user-1", displayName: "User One" };
-    const { status, prompts } = await answer(host, "oauth", ["sk-ant-oat01-personal"], actor);
-    expect(prompts).toEqual(["secret"]);
+    await signInClaudeCli();
+    const { status, prompts } = await answer(
+      host,
+      "oauth",
+      ["oauth-token", "sk-ant-oat01-personal"],
+      actor,
+    );
+    expect(prompts).toEqual(["select", "secret"]);
     expect(status.state).toBe("succeeded");
+    await host.close();
+  });
+
+  test("a web sign-in opens Claude's page and asks for the code Anthropic shows", async () => {
+    vi.stubEnv("OPENGUI_SERVER_MODE", "");
+    const host = new OpenGuiHost(await directory(), {
+      fetchImpl: (async () => new Response("", { status: 404 })) as typeof fetch,
+    });
+    await host.start();
+    const actor = { type: "user" as const, id: "user-1", displayName: "User One" };
+    let status = host.beginProviderLogin("claude-code", "oauth", actor);
+    for (let tick = 0; tick < 200 && status.state === "running"; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      status = host.providerLoginStatus("claude-code", actor) ?? status;
+    }
+    expect(status.prompt).toMatchObject({ type: "select" });
+    status = await host.respondProviderLogin("claude-code", status.prompt!.id, "account", actor);
+    for (let tick = 0; tick < 200 && status.prompt?.type !== "manual_code"; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      status = host.providerLoginStatus("claude-code", actor) ?? status;
+    }
+    // pi's own "browser or copy code" choice is answered for the user.
+    expect(status).toMatchObject({ state: "awaiting_input", prompt: { type: "manual_code" } });
+    const signIn = status.events.find((event) => event.type === "auth_url");
+    const url = new URL(signIn?.type === "auth_url" ? signIn.url : "about:blank");
+    expect(url.origin + url.pathname).toBe("https://claude.ai/oauth/authorize");
+    expect(url.searchParams.get("redirect_uri")).toBe(
+      "https://platform.claude.com/oauth/code/callback",
+    );
+    expect(url.searchParams.get("scope")).toContain("user:inference");
+    host.cancelProviderLogin("claude-code", actor);
+    await host.close();
+  });
+
+  test("no longer offers pi's direct Anthropic API provider", async () => {
+    const host = new OpenGuiHost(await directory(), {
+      fetchImpl: (async () => new Response("", { status: 404 })) as typeof fetch,
+    });
+    await host.start();
+    const ids = host.listProviders().map((provider) => provider.id);
+    expect(ids).toContain("claude-code");
+    expect(ids).not.toContain("anthropic");
+    expect(() => host.beginProviderLogin("anthropic", "oauth")).toThrow("no longer offered");
+    expect(() => host.beginProviderLogin("anthropic", "api_key")).toThrow("no longer offered");
+    expect(host.listProviders().some((provider) => "retired" in provider)).toBe(false);
     await host.close();
   });
 
@@ -116,6 +177,7 @@ describe("OpenGuiHost with the Claude Code provider", () => {
       fetchImpl: (async () => new Response("", { status: 404 })) as typeof fetch,
     });
     await host.start();
+    await signInClaudeCli();
     await answer(host, "oauth", ["local"]);
     const session = await host.createSession({
       projectDirectory: project,

@@ -7,6 +7,12 @@
 - New Claude Code provider: run Claude models through Claude Code with your Claude subscription
   (Claude Code's login on the Host, or a `claude setup-token` token) or an Anthropic API key.
   OpenGUI still runs every tool; Claude Code only answers. See `docs/claude-code.md`.
+- The Claude Code provider is now called **Anthropic** and signs in with your Claude account in
+  the browser (on the web, paste the code claude.ai shows). OpenGUI keeps the tokens fresh and
+  hands them to Claude Code, so your Pro or Max plan's limits apply. Personal connections can use
+  it too. Claude Code's own login on the Host is offered only when `claude` is signed in there.
+- pi's direct Anthropic API provider is no longer offered, since a Claude plan bills it as extra
+  usage. An existing connection keeps working and can still be disconnected.
 
 ## 0.7.5
 

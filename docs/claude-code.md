@@ -43,22 +43,38 @@ Here it runs in the Host process.
 
 ## Signing in
 
-Settings › Providers › Claude Code offers:
+The provider is shown as **Anthropic**; its id stays `claude-code`. Settings › Providers › Anthropic
+offers:
 
+- **Subscription → Sign in with your Claude account.** pi's Anthropic OAuth flow (the one Claude Code
+  uses) signs a Claude Pro or Max account in. The desktop app catches the browser's redirect on
+  `localhost`; any other Host (web, Docker) shows the sign-in link and asks for the code claude.ai
+  displays afterwards (`code#state`). OpenGUI stores the access and refresh tokens in Host secret
+  storage, hands Claude Code the current access token as `CLAUDE_CODE_OAUTH_TOKEN`, and renews it
+  through pi's locked refresh half an hour before it expires. A new access token starts a fresh
+  Claude Code process for the Session (see above). Works for the Host's connection and for personal
+  connections alike.
 - **Subscription → Use Claude Code's login on this computer.** Uses the account the `claude` CLI is
-  signed in to on the Host machine. Run `claude` and `/login` first. Only the Host's own connection
-  can use it. A personal connection on a multi-user Host must bring its own credential.
+  signed in to on the Host machine. Offered only when `claude` is signed in there
+  (`$CLAUDE_CONFIG_DIR/.credentials.json` or `~/.claude/.credentials.json`; always in the desktop
+  app, where macOS keeps it in the Keychain) and only for the Host's own connection. A personal
+  connection on a multi-user Host must bring its own credential.
 - **Subscription → Paste a token from `claude setup-token`.** A long-lived token for one Claude
   account, stored in Host secret storage.
 - **API key.** An Anthropic Console key; requests are billed to its organization.
 
 Ambient `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` variables are
-removed from Claude Code's environment, so the chosen sign-in is the one used. Token and API-key
-sign-ins run with their own `CLAUDE_CONFIG_DIR`, never the user's.
+removed from Claude Code's environment, so the chosen sign-in is the one used. Account, token and
+API-key sign-ins run with their own `CLAUDE_CONFIG_DIR`, never the user's.
+
+pi's own `anthropic` provider is retired: it calls the API directly, which a Claude plan bills as
+extra usage. It is listed as "Anthropic (direct API)" only while a connection to it exists, so it
+can be disconnected; new sign-ins are refused.
 
 Anthropic allows a person to use their own Claude plan through Claude Code and the Agent SDK.
 Offering that login to other people is not allowed without approval. Do not share a Host connection
-signed in with a personal plan through model offerings to other members.
+signed in with a personal plan through model offerings to other members. The account sign-in uses
+Claude Code's OAuth client, as pi does; Anthropic may restrict that client to Claude Code itself.
 
 ## Claude Code executable
 
